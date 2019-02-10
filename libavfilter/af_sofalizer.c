@@ -161,10 +161,11 @@ static int preload_sofa(AVFilterContext *ctx, char *filename, int *samplingrate)
         return AVERROR(EINVAL);
 
     if (s->interpolate)
-        s->sofa.neighborhood = mysofa_neighborhood_init_withstepdefine(s->sofa.hrtf,
-                                                                       s->sofa.lookup,
-                                                                       s->anglestep,
-                                                                       s->radstep);
+        //s->sofa.neighborhood = mysofa_neighborhood_init_withstepdefine(s->sofa.hrtf,
+        //                                                               s->sofa.lookup,
+        //                                                               s->anglestep,
+        //                                                               s->radstep);
+		s->sofa.neighborhood = mysofa_neighborhood_init(s->sofa.hrtf, s->sofa.lookup);
 
     s->sofa.fir = av_calloc(s->sofa.hrtf->N * s->sofa.hrtf->R, sizeof(*s->sofa.fir));
     if (!s->sofa.fir)
