@@ -1366,6 +1366,9 @@ static void fix_frag_index_entries(MOVFragmentIndex *frag_index, int index,
 
 static int mov_read_moof(MOVContext *c, AVIOContext *pb, MOVAtom atom)
 {
+    // Set by mov_read_tfhd(). mov_read_trun() will reject files missing tfhd.
+    c->fragment.found_tfhd = 0;
+
     if (!c->has_looked_for_mfra && c->use_mfra_for > 0) {
         c->has_looked_for_mfra = 1;
         if (pb->seekable & AVIO_SEEKABLE_NORMAL) {
@@ -2694,8 +2697,11 @@ static inline int64_t mov_get_stsc_samples(MOVStreamContext *sc, unsigned int in
 
     if (mov_stsc_index_valid(index, sc->stsc_count))
         chunk_count = sc->stsc_data[index + 1].first - sc->stsc_data[index].first;
-    else
+    else {
+        // Validation for stsc / stco  happens earlier in mov_read_stsc + mov_read_trak.
+        av_assert0(sc->stsc_data[index].first <= sc->chunk_count);
         chunk_count = sc->chunk_count - (sc->stsc_data[index].first - 1);
+    }
 
     return sc->stsc_data[index].count * (int64_t)chunk_count;
 }
@@ -2923,12 +2929,6 @@ static int mov_read_stts(MOVContext *c, AVIOContext *pb, MOVAtom atom)
         av_log(c->fc, AV_LOG_TRACE, "sample_count=%d, sample_duration=%d\n",
                 sample_count, sample_duration);
 
-        if (   i+1 == entries
-            && i
-            && sample_count == 1
-            && total_sample_count > 100
-            && sample_duration/10 > duration / total_sample_count)
-            sample_duration = duration / total_sample_count;
         duration+=(int64_t)sample_duration*(uint64_t)sample_count;
         total_sample_count+=sample_count;
     }
@@ -4173,6 +4173,13 @@ static int mov_read_trak(MOVContext *c, AVIOContext *pb, MOVAtom atom)
 
     c->trak_index = -1;
 
+    // Here stsc refers to a chunk not described in stco. This is technically invalid,
+    // but we can overlook it (clearing stsc) whenever stts_count == 0 (indicating no samples).
+    if (!sc->chunk_count && !sc->stts_count && sc->stsc_count) {
+        sc->stsc_count = 0;
+        av_freep(&sc->stsc_data);
+    }
+
     /* sanity checks */
     if ((sc->chunk_count && (!sc->stts_count || !sc->stsc_count ||
                             (!sc->sample_size && !sc->sample_count))) ||
@@ -4181,7 +4188,7 @@ static int mov_read_trak(MOVContext *c, AVIOContext *pb, MOVAtom atom)
                st->index);
         return 0;
     }
-    if (sc->chunk_count && sc->stsc_count && sc->stsc_data[ sc->stsc_count - 1 ].first > sc->chunk_count) {
+    if (sc->stsc_count && sc->stsc_data[ sc->stsc_count - 1 ].first > sc->chunk_count) {
         av_log(c->fc, AV_LOG_ERROR, "stream %d, contradictionary STSC and STCO\n",
                st->index);
         return AVERROR_INVALIDDATA;
@@ -4550,23 +4557,25 @@ static int mov_read_tfhd(MOVContext *c, AVIOContext *pb, MOVAtom atom)
     MOVTrackExt *trex = NULL;
     int flags, track_id, i;
 
+    c->fragment.found_tfhd = 1;
+
     avio_r8(pb); /* version */
     flags = avio_rb24(pb);
 
     track_id = avio_rb32(pb);
     if (!track_id)
         return AVERROR_INVALIDDATA;
-    frag->track_id = track_id;
-    set_frag_stream(&c->frag_index, track_id);
     for (i = 0; i < c->trex_count; i++)
-        if (c->trex_data[i].track_id == frag->track_id) {
+        if (c->trex_data[i].track_id == track_id) {
             trex = &c->trex_data[i];
             break;
         }
     if (!trex) {
-        av_log(c->fc, AV_LOG_ERROR, "could not find corresponding trex\n");
-        return AVERROR_INVALIDDATA;
+        av_log(c->fc, AV_LOG_WARNING, "could not find corresponding trex (id %u)\n", track_id);
+        return 0;
     }
+    frag->track_id = track_id;
+    set_frag_stream(&c->frag_index, track_id);
 
     frag->base_data_offset = flags & MOV_TFHD_BASE_DATA_OFFSET ?
                              avio_rb64(pb) : flags & MOV_TFHD_DEFAULT_BASE_IS_MOOF ?
@@ -4645,8 +4654,8 @@ static int mov_read_tfdt(MOVContext *c, AVIOContext *pb, MOVAtom atom)
         }
     }
     if (!st) {
-        av_log(c->fc, AV_LOG_ERROR, "could not find corresponding track id %u\n", frag->track_id);
-        return AVERROR_INVALIDDATA;
+        av_log(c->fc, AV_LOG_WARNING, "could not find corresponding track id %u\n", frag->track_id);
+        return 0;
     }
     sc = st->priv_data;
     if (sc->pseudo_stream_id + 1 != frag->stsd_id && sc->pseudo_stream_id != -1)
@@ -4685,6 +4694,11 @@ static int mov_read_trun(MOVContext *c, AVIOContext *pb, MOVAtom atom)
     AVIndexEntry *new_entries;
     MOVFragmentStreamInfo * frag_stream_info;
 
+    if (!frag->found_tfhd) {
+        av_log(c->fc, AV_LOG_ERROR, "trun track id unknown, no tfhd was found\n");
+        return AVERROR_INVALIDDATA;
+    }
+
     for (i = 0; i < c->fc->nb_streams; i++) {
         if (c->fc->streams[i]->id == frag->track_id) {
             st = c->fc->streams[i];
@@ -4692,8 +4706,8 @@ static int mov_read_trun(MOVContext *c, AVIOContext *pb, MOVAtom atom)
         }
     }
     if (!st) {
-        av_log(c->fc, AV_LOG_ERROR, "could not find corresponding track id %u\n", frag->track_id);
-        return AVERROR_INVALIDDATA;
+        av_log(c->fc, AV_LOG_WARNING, "could not find corresponding track id %u\n", frag->track_id);
+        return 0;
     }
     sc = st->priv_data;
     if (sc->pseudo_stream_id+1 != frag->stsd_id && sc->pseudo_stream_id != -1)
