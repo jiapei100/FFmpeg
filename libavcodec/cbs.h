@@ -341,7 +341,7 @@ void ff_cbs_fragment_free(CodedBitstreamContext *ctx,
 int ff_cbs_alloc_unit_content(CodedBitstreamContext *ctx,
                               CodedBitstreamUnit *unit,
                               size_t size,
-                              void (*free)(void *unit, uint8_t *content));
+                              void (*free)(void *opaque, uint8_t *content));
 
 /**
  * Allocate a new internal data buffer of the given size in the unit.
@@ -380,10 +380,12 @@ int ff_cbs_insert_unit_data(CodedBitstreamContext *ctx,
 
 /**
  * Delete a unit from a fragment and free all memory it uses.
+ *
+ * Requires position to be >= 0 and < frag->nb_units.
  */
-int ff_cbs_delete_unit(CodedBitstreamContext *ctx,
-                       CodedBitstreamFragment *frag,
-                       int position);
+void ff_cbs_delete_unit(CodedBitstreamContext *ctx,
+                        CodedBitstreamFragment *frag,
+                        int position);
 
 
 #endif /* AVCODEC_CBS_H */
